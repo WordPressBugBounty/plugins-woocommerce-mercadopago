@@ -65,7 +65,7 @@ if (!defined('ABSPATH')) {
                     </div>
 
                     <div class='mp-wallet-button-button'>
-                        <button id="mp-wallet-button">
+                        <button id="mp-wallet-button" onclick="submitWalletButton(event)">
                             <img src="<?= esc_url($wallet_button_image); ?>">
                         </button>
                     </div>
@@ -235,20 +235,16 @@ if (!defined('ABSPATH')) {
 </div>
 
 <script type="text/javascript">
-    document.addEventListener('DOMContentLoaded', () => {
-        const submitWalletButton = (event) => {
-            event.preventDefault();
-            
-            if (window.mpSuperTokenTriggerHandler) {
-                window.mpSuperTokenTriggerHandler.onTriggerWalletButton();
-                return;
-            }
-
-            jQuery('#mp_checkout_type').val('wallet_button');
-            jQuery('form.checkout, form#order_review').submit();
+    function submitWalletButton(event) {
+        event.preventDefault();
+        
+        if (window.mpSuperTokenTriggerHandler) {
+            window.mpSuperTokenTriggerHandler.onTriggerWalletButton();
+            return;
         }
 
-        document.getElementById('mp-wallet-button')?.addEventListener('click', submitWalletButton);
-    })
+        jQuery('#mp_checkout_type').val('wallet_button');
+        jQuery('form.checkout, form#order_review').submit();
+    }
 </script>
 
