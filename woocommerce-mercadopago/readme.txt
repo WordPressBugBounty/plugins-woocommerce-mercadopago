@@ -4,7 +4,7 @@ Tags: ecommerce, mercadopago, woocommerce
 Requires at least: 6.3
 Tested up to: 6.9
 Requires PHP: 7.4
-Stable tag: 8.7.20
+Stable tag: 8.7.21
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -134,18 +134,14 @@ Set up both the plugin and the checkouts you want to activate on your payment av
 
 Check out our <a href="https://www.mercadopago.com.br/developers/pt/plugins_sdks/plugins/official/woo-commerce/">official documentation</a> for more information on the specific fields to configure.
 
-= v8.7.20 (28/04/2026) =
+= v8.7.21 (04/05/2026) =
 * Added
-- Add metric mp_js_cache_age to detect stale plugin JS files cached on seller servers
-- Add metric mp_custom_checkout_validation_cdn_fallback when checkout validation CDN function is unavailable
+- Add structured error logging and monitoring for payment API calls
+- Preserve selected payment method and installments after a failed payment attempt
 
 * Fixed
-- Fix fatal error on first admin page load after install or update when gateway classes initialize before plugin is fully booted
-- Fix checkout blocked by hidden third-party shipping sub-fields (e.g. kShipping Argentina office selector) when a simpler shipping method is selected — validation now delegates to CDN and only evaluates visible fields
-- Fix fast payment flow rendering over another payment method when switching quickly between custom checkout and another payment method
-
-* Changed
-- Prevent fast payment flow from initializing when the email field contains invalid data (partial text, address, or phone number), reducing authentication errors during checkout
-
+- Fix TypeError when processing fast payment installment selection in certain checkout layouts where the installments field is absent from the DOM
+- Fix fast payment initialization failing when a non-custom payment method is selected by default
+- Fix payment method icon styling interfering with other payment gateways in Blocks checkout
 
 [See changelog for all versions](https://github.com/mercadopago/cart-woocommerce/blob/main/CHANGELOG.md).
