@@ -4,10 +4,10 @@
 
 namespace Composer\Autoload;
 
-class ComposerStaticInit3fbec3256bf8d1ab9d096a5761d3dd59
+class ComposerStaticInit18ea251a1d3302239f52e95d9f180dd5
 {
     public static $prefixLengthsPsr4 = array (
-        'M' =>
+        'M' => 
         array (
             'MercadoPago\\Woocommerce\\' => 24,
             'MercadoPago\\PP\\Sdk\\' => 19,
@@ -15,11 +15,11 @@ class ComposerStaticInit3fbec3256bf8d1ab9d096a5761d3dd59
     );
 
     public static $prefixDirsPsr4 = array (
-        'MercadoPago\\Woocommerce\\' =>
+        'MercadoPago\\Woocommerce\\' => 
         array (
             0 => __DIR__ . '/../..' . '/src',
         ),
-        'MercadoPago\\PP\\Sdk\\' =>
+        'MercadoPago\\PP\\Sdk\\' => 
         array (
             0 => __DIR__ . '/..' . '/mp-plugins/php-sdk/src',
         ),
@@ -104,6 +104,7 @@ class ComposerStaticInit3fbec3256bf8d1ab9d096a5761d3dd59
         'MercadoPago\\PP\\Sdk\\Entity\\Preference\\Shipment' => __DIR__ . '/..' . '/mp-plugins/php-sdk/src/Entity/Preference/Shipment.php',
         'MercadoPago\\PP\\Sdk\\Entity\\Preference\\Track' => __DIR__ . '/..' . '/mp-plugins/php-sdk/src/Entity/Preference/Track.php',
         'MercadoPago\\PP\\Sdk\\Entity\\Preference\\TrackList' => __DIR__ . '/..' . '/mp-plugins/php-sdk/src/Entity/Preference/TrackList.php',
+        'MercadoPago\\PP\\Sdk\\Exceptions\\ApiException' => __DIR__ . '/..' . '/mp-plugins/php-sdk/src/Exceptions/ApiException.php',
         'MercadoPago\\PP\\Sdk\\HttpClient\\HttpClient' => __DIR__ . '/..' . '/mp-plugins/php-sdk/src/HttpClient/HttpClient.php',
         'MercadoPago\\PP\\Sdk\\HttpClient\\HttpClientInterface' => __DIR__ . '/..' . '/mp-plugins/php-sdk/src/HttpClient/HttpClientInterface.php',
         'MercadoPago\\PP\\Sdk\\HttpClient\\Requester\\CurlRequester' => __DIR__ . '/..' . '/mp-plugins/php-sdk/src/HttpClient/Requester/CurlRequester.php',
@@ -126,6 +127,7 @@ class ComposerStaticInit3fbec3256bf8d1ab9d096a5761d3dd59
         'MercadoPago\\Woocommerce\\Configs\\Store' => __DIR__ . '/../..' . '/src/Configs/Store.php',
         'MercadoPago\\Woocommerce\\Dependencies' => __DIR__ . '/../..' . '/src/Dependencies.php',
         'MercadoPago\\Woocommerce\\Endpoints\\CheckoutCustom' => __DIR__ . '/../..' . '/src/Endpoints/CheckoutCustom.php',
+        'MercadoPago\\Woocommerce\\Endpoints\\CheckoutValidation' => __DIR__ . '/../..' . '/src/Endpoints/CheckoutValidation.php',
         'MercadoPago\\Woocommerce\\Endpoints\\IntegrationWebhook' => __DIR__ . '/../..' . '/src/Endpoints/IntegrationWebhook.php',
         'MercadoPago\\Woocommerce\\Entities\\Files\\Log' => __DIR__ . '/../..' . '/src/Entities/Files/Log.php',
         'MercadoPago\\Woocommerce\\Entities\\Metadata\\PaymentMetadata' => __DIR__ . '/../..' . '/src/Entities/Metadata/PaymentMetadata.php',
@@ -155,6 +157,7 @@ class ComposerStaticInit3fbec3256bf8d1ab9d096a5761d3dd59
         'MercadoPago\\Woocommerce\\Helpers\\Cache' => __DIR__ . '/../..' . '/src/Helpers/Cache.php',
         'MercadoPago\\Woocommerce\\Helpers\\Cart' => __DIR__ . '/../..' . '/src/Helpers/Cart.php',
         'MercadoPago\\Woocommerce\\Helpers\\Categories' => __DIR__ . '/../..' . '/src/Helpers/Categories.php',
+        'MercadoPago\\Woocommerce\\Helpers\\CheckoutValidator' => __DIR__ . '/../..' . '/src/Helpers/CheckoutValidator.php',
         'MercadoPago\\Woocommerce\\Helpers\\Country' => __DIR__ . '/../..' . '/src/Helpers/Country.php',
         'MercadoPago\\Woocommerce\\Helpers\\CredentialsStates' => __DIR__ . '/../..' . '/src/Helpers/CredentialsStates.php',
         'MercadoPago\\Woocommerce\\Helpers\\CreditsEnabled' => __DIR__ . '/../..' . '/src/Helpers/CreditsEnabled.php',
@@ -244,9 +247,9 @@ class ComposerStaticInit3fbec3256bf8d1ab9d096a5761d3dd59
     public static function getInitializer(ClassLoader $loader)
     {
         return \Closure::bind(function () use ($loader) {
-            $loader->prefixLengthsPsr4 = ComposerStaticInit3fbec3256bf8d1ab9d096a5761d3dd59::$prefixLengthsPsr4;
-            $loader->prefixDirsPsr4 = ComposerStaticInit3fbec3256bf8d1ab9d096a5761d3dd59::$prefixDirsPsr4;
-            $loader->classMap = ComposerStaticInit3fbec3256bf8d1ab9d096a5761d3dd59::$classMap;
+            $loader->prefixLengthsPsr4 = ComposerStaticInit18ea251a1d3302239f52e95d9f180dd5::$prefixLengthsPsr4;
+            $loader->prefixDirsPsr4 = ComposerStaticInit18ea251a1d3302239f52e95d9f180dd5::$prefixDirsPsr4;
+            $loader->classMap = ComposerStaticInit18ea251a1d3302239f52e95d9f180dd5::$classMap;
 
         }, null, ClassLoader::class);
     }
