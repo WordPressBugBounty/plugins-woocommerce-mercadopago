@@ -7,7 +7,7 @@ namespace Composer\Autoload;
 class ComposerStaticInit18ea251a1d3302239f52e95d9f180dd5
 {
     public static $prefixLengthsPsr4 = array (
-        'M' =>
+        'M' => 
         array (
             'MercadoPago\\Woocommerce\\' => 24,
             'MercadoPago\\PP\\Sdk\\' => 19,
@@ -15,11 +15,11 @@ class ComposerStaticInit18ea251a1d3302239f52e95d9f180dd5
     );
 
     public static $prefixDirsPsr4 = array (
-        'MercadoPago\\Woocommerce\\' =>
+        'MercadoPago\\Woocommerce\\' => 
         array (
             0 => __DIR__ . '/../..' . '/src',
         ),
-        'MercadoPago\\PP\\Sdk\\' =>
+        'MercadoPago\\PP\\Sdk\\' => 
         array (
             0 => __DIR__ . '/..' . '/mp-plugins/php-sdk/src',
         ),
@@ -154,6 +154,7 @@ class ComposerStaticInit18ea251a1d3302239f52e95d9f180dd5
         'MercadoPago\\Woocommerce\\Helpers' => __DIR__ . '/../..' . '/src/Helpers.php',
         'MercadoPago\\Woocommerce\\Helpers\\Actions' => __DIR__ . '/../..' . '/src/Helpers/Actions.php',
         'MercadoPago\\Woocommerce\\Helpers\\Arrays' => __DIR__ . '/../..' . '/src/Helpers/Arrays.php',
+        'MercadoPago\\Woocommerce\\Helpers\\AutomaticPaymentsClient' => __DIR__ . '/../..' . '/src/Helpers/AutomaticPaymentsClient.php',
         'MercadoPago\\Woocommerce\\Helpers\\Cache' => __DIR__ . '/../..' . '/src/Helpers/Cache.php',
         'MercadoPago\\Woocommerce\\Helpers\\Cart' => __DIR__ . '/../..' . '/src/Helpers/Cart.php',
         'MercadoPago\\Woocommerce\\Helpers\\Categories' => __DIR__ . '/../..' . '/src/Helpers/Categories.php',
@@ -188,8 +189,11 @@ class ComposerStaticInit18ea251a1d3302239f52e95d9f180dd5
         'MercadoPago\\Woocommerce\\Helpers\\Requester' => __DIR__ . '/../..' . '/src/Helpers/Requester.php',
         'MercadoPago\\Woocommerce\\Helpers\\Session' => __DIR__ . '/../..' . '/src/Helpers/Session.php',
         'MercadoPago\\Woocommerce\\Helpers\\Strings' => __DIR__ . '/../..' . '/src/Helpers/Strings.php',
+        'MercadoPago\\Woocommerce\\Helpers\\SubscriptionsCredentialsValidator' => __DIR__ . '/../..' . '/src/Helpers/SubscriptionsCredentialsValidator.php',
+        'MercadoPago\\Woocommerce\\Helpers\\SubscriptionsHelper' => __DIR__ . '/../..' . '/src/Helpers/SubscriptionsHelper.php',
         'MercadoPago\\Woocommerce\\Helpers\\Template' => __DIR__ . '/../..' . '/src/Helpers/Template.php',
         'MercadoPago\\Woocommerce\\Helpers\\Url' => __DIR__ . '/../..' . '/src/Helpers/Url.php',
+        'MercadoPago\\Woocommerce\\Helpers\\WebhookUrl' => __DIR__ . '/../..' . '/src/Helpers/WebhookUrl.php',
         'MercadoPago\\Woocommerce\\Hooks' => __DIR__ . '/../..' . '/src/Hooks.php',
         'MercadoPago\\Woocommerce\\Hooks\\Admin' => __DIR__ . '/../..' . '/src/Hooks/Admin.php',
         'MercadoPago\\Woocommerce\\Hooks\\Blocks' => __DIR__ . '/../..' . '/src/Hooks/Blocks.php',
@@ -203,6 +207,7 @@ class ComposerStaticInit18ea251a1d3302239f52e95d9f180dd5
         'MercadoPago\\Woocommerce\\Hooks\\Plugin' => __DIR__ . '/../..' . '/src/Hooks/Plugin.php',
         'MercadoPago\\Woocommerce\\Hooks\\Product' => __DIR__ . '/../..' . '/src/Hooks/Product.php',
         'MercadoPago\\Woocommerce\\Hooks\\Scripts' => __DIR__ . '/../..' . '/src/Hooks/Scripts.php',
+        'MercadoPago\\Woocommerce\\Hooks\\Subscriptions' => __DIR__ . '/../..' . '/src/Hooks/Subscriptions.php',
         'MercadoPago\\Woocommerce\\Hooks\\Template' => __DIR__ . '/../..' . '/src/Hooks/Template.php',
         'MercadoPago\\Woocommerce\\IO\\Downloader' => __DIR__ . '/../..' . '/src/IO/Downloader.php',
         'MercadoPago\\Woocommerce\\Interfaces\\LogInterface' => __DIR__ . '/../..' . '/src/Interfaces/LogInterface.php',
