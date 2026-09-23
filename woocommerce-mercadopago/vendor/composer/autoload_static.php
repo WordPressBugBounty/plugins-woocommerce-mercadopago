@@ -4,10 +4,10 @@
 
 namespace Composer\Autoload;
 
-class ComposerStaticInit18ea251a1d3302239f52e95d9f180dd5
+class ComposerStaticInit2cbef7d43bc272823d4d80b299eb68ed
 {
     public static $prefixLengthsPsr4 = array (
-        'M' =>
+        'M' => 
         array (
             'MercadoPago\\Woocommerce\\' => 24,
             'MercadoPago\\PP\\Sdk\\' => 19,
@@ -15,11 +15,11 @@ class ComposerStaticInit18ea251a1d3302239f52e95d9f180dd5
     );
 
     public static $prefixDirsPsr4 = array (
-        'MercadoPago\\Woocommerce\\' =>
+        'MercadoPago\\Woocommerce\\' => 
         array (
             0 => __DIR__ . '/../..' . '/src',
         ),
-        'MercadoPago\\PP\\Sdk\\' =>
+        'MercadoPago\\PP\\Sdk\\' => 
         array (
             0 => __DIR__ . '/..' . '/mp-plugins/php-sdk/src',
         ),
@@ -259,9 +259,9 @@ class ComposerStaticInit18ea251a1d3302239f52e95d9f180dd5
     public static function getInitializer(ClassLoader $loader)
     {
         return \Closure::bind(function () use ($loader) {
-            $loader->prefixLengthsPsr4 = ComposerStaticInit18ea251a1d3302239f52e95d9f180dd5::$prefixLengthsPsr4;
-            $loader->prefixDirsPsr4 = ComposerStaticInit18ea251a1d3302239f52e95d9f180dd5::$prefixDirsPsr4;
-            $loader->classMap = ComposerStaticInit18ea251a1d3302239f52e95d9f180dd5::$classMap;
+            $loader->prefixLengthsPsr4 = ComposerStaticInit2cbef7d43bc272823d4d80b299eb68ed::$prefixLengthsPsr4;
+            $loader->prefixDirsPsr4 = ComposerStaticInit2cbef7d43bc272823d4d80b299eb68ed::$prefixDirsPsr4;
+            $loader->classMap = ComposerStaticInit2cbef7d43bc272823d4d80b299eb68ed::$classMap;
 
         }, null, ClassLoader::class);
     }
