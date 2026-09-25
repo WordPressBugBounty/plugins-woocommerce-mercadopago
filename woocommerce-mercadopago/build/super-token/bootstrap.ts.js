@@ -69,12 +69,13 @@ function sendToCoreMonitor(metricName, payload, transport = 'fetch') {
  *
  * Note: `super-token-metrics.js` (legacy) mirrored `MPCustomEventDispatcher`
  * (`mp-checkout-error-dispatcher.js`) with a per-event `waitForMelidata` + 5s race.
- * This buffer approach intentionally diverges from that mirror; aligning the
- * canonical dispatcher is a separate follow-up.
+ * This adapter keeps one 5s deadline for the whole FIFO buffer rather than one timer
+ * per event, preventing a never-settled readiness promise from retaining events forever.
  */
 class MelidataAdapter {
   MELIDATA_ERROR_EVENT_NAME = 'mp_checkout_error';
   MELIDATA_LOAD_TIMEOUT_METRIC = 'mp_melidata_load_timeout';
+  MELIDATA_LOAD_TIMEOUT_MS = 5000;
   /**
    * Currently typed as `BufferedErrorEvent[]` because `dispatchMelidataErrorEvent`
    * is the only public method and the only event type flowing through the adapter.
@@ -87,6 +88,7 @@ class MelidataAdapter {
   failed = false;
   readinessArmed = false;
   loadListenerAdded = false;
+  readinessTimer = null;
   constructor(sendMetric) {
     this.sendMetric = sendMetric;
   }
@@ -122,6 +124,7 @@ class MelidataAdapter {
       this.onReady();
       return;
     }
+    this.armTimeout();
     if (window.melidataReady && typeof window.melidataReady.then === 'function') {
       window.melidataReady.then(() => this.onReady()).catch(() => this.onFailure());
       return;
@@ -148,19 +151,35 @@ class MelidataAdapter {
       });
     }
   }
+  armTimeout() {
+    if (this.readinessTimer || this.ready || this.failed) {
+      return;
+    }
+    this.readinessTimer = setTimeout(() => this.onFailure(), this.MELIDATA_LOAD_TIMEOUT_MS);
+  }
+  clearTimeout() {
+    if (!this.readinessTimer) {
+      return;
+    }
+    clearTimeout(this.readinessTimer);
+    this.readinessTimer = null;
+  }
   onReady() {
+    if (this.ready || this.failed) {
+      return;
+    }
     this.ready = true;
+    this.clearTimeout();
     this.flush();
   }
   onFailure() {
+    if (this.ready || this.failed) {
+      return;
+    }
     this.failed = true;
-    // Intentional divergence from the legacy `waitForMelidata_` + 5s race (super-token-metrics.js).
-    // Legacy: each event raced independently, so mp_melidata_load_timeout fired once per event
-    //   with message = cleanMessage (the actual error text).
-    // Here: one metric fires for the whole buffer with message = 'buffered:N'.
-    //   Benefit: N tells the consumer how many events were lost, which is more actionable
-    //   than a per-event timeout race; side-effect: the original error text is not in the metric.
-    // Consumers of mp_melidata_load_timeout should expect this new shape from this adapter forward.
+    this.clearTimeout();
+    // The deadline belongs to the buffer, not to each buffered event. Emit one timeout signal
+    // and keep the individual diagnostics on their original Core Monitor metrics + FIFO events.
     this.sendMetric(this.MELIDATA_LOAD_TIMEOUT_METRIC, 'true', `buffered:${this.buffer.length}`);
     this.flush();
   }
@@ -191,7 +210,7 @@ class MelidataAdapter {
 /**
  * Injected into the init telemetry as `js_version`. Kept in sync with the CDN bundle's version.
  */
-const SUPER_TOKEN_JS_VERSION = '1.2.5';
+const SUPER_TOKEN_JS_VERSION = '1.2.6';
 const V2_VARIANT = 'v2';
 const V21_VARIANT = 'v2.1';
 
@@ -211,7 +230,203 @@ const SUPER_TOKEN_VARIANT_COOKIE = 'mp_st_variant';
 const SUPER_TOKEN_BUNDLE_ENV = 'v1';
 const SUPER_TOKEN_STORAGE_BASE_URL = `https://http2.mlstatic.com/storage/${SUPER_TOKEN_BUNDLE_ENV}/mercadopago/woocommerce/scripts`;
 const SUPER_TOKEN_AB_CONFIG_URL = `${SUPER_TOKEN_STORAGE_BASE_URL}/config/super-token-variants.js`;
+;// ./assets/js/checkouts/super-token/core/checkoutSession/ErrorClassification.ts
+/**
+ * Single source of truth for Super Token error codes and the pure mapping from an
+ * error code to the message shown to the buyer. No side effects: unlike the legacy
+ * convertErrorCodeToErrorMessage (v2.1:262), this neither increments the retry
+ * counter nor emits metrics — the caller (use case) owns the counter (SuperTokenState)
+ * and the retry-limit metric (MetricsPort).
+ *
+ * Codes migrated 1:1 from v2.1/errors/super-token-error-constants.js.
+ */
+
+const ErrorClassification_MPSuperTokenErrorCodes = {
+  // Validation errors
+  SELECT_PAYMENT_METHOD_ERROR: 'SELECT_PAYMENT_METHOD_ERROR',
+  SELECT_PAYMENT_METHOD_NOT_VALID: 'SELECT_PAYMENT_METHOD_NOT_VALID',
+  // Authentication errors
+  AUTHENTICATOR_NOT_FOUND: 'AUTHENTICATOR_NOT_FOUND',
+  AUTHORIZE_PAYMENT_METHOD_ERROR: 'AUTHORIZE_PAYMENT_METHOD_ERROR',
+  AUTHORIZE_PAYMENT_METHOD_USER_CANCELLED: 'AUTHORIZE_PAYMENT_METHOD_USER_CANCELLED',
+  // Payment errors
+  UPDATE_SECURITY_CODE_ERROR: 'UPDATE_SECURITY_CODE_ERROR',
+  EMPTY_ACCOUNT_PAYMENT_METHODS: 'EMPTY_ACCOUNT_PAYMENT_METHODS',
+  GET_PAYMENT_METHOD_TIMEOUT_ERROR: 'GET_PAYMENT_METHOD_TIMEOUT_ERROR',
+  FETCH_PAYMENT_METHOD_NOT_FOUND: 'FETCH_PAYMENT_METHOD_NOT_FOUND',
+  PAYMENT_METHOD_NOT_EXISTS: 'PAYMENT_METHOD_NOT_EXISTS',
+  UPDATE_PAYMENT_METHOD_WITH_ESC_FAILED_EMPTY_METHODS: 'UPDATE_PAYMENT_METHOD_WITH_ESC_FAILED_EMPTY_METHODS',
+  // System errors
+  SUPER_TOKEN_PAYMENT_METHODS_NOT_FOUND: 'SUPER_TOKEN_PAYMENT_METHODS_NOT_FOUND',
+  SUPER_TOKEN_AUTHENTICATOR_NOT_FOUND: 'SUPER_TOKEN_AUTHENTICATOR_NOT_FOUND',
+  CUSTOM_CHECKOUT_ENTIRE_ELEMENT_NOT_FOUND: 'CUSTOM_CHECKOUT_ENTIRE_ELEMENT_NOT_FOUND',
+  SUPER_TOKEN_METRICS_NOT_FOUND: 'SUPER_TOKEN_METRICS_NOT_FOUND',
+  // Generic error
+  UNKNOWN_ERROR: 'UNKNOWN_ERROR'
+};
+const KNOWN_ERROR_CODES = Object.values(ErrorClassification_MPSuperTokenErrorCodes);
+const SENSITIVE_ERROR_KEY_NAMES = 'authorization|access_token|refresh_token|id_token|token|authorized_pseudotoken|pseudotoken|password|client[_-]?secret|x[_-]?api[_-]?key|api[_-]?key|secret|security_code|cvv|card_number|cookie|set[_-]?cookie|session(?:[_-]?(?:id|token))?|jwt';
+const SENSITIVE_ERROR_KEY = new RegExp(`^(?:${SENSITIVE_ERROR_KEY_NAMES})$`, 'i');
+const EMAIL_ADDRESS_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
+const BEARER_TOKEN_PATTERN = /\b(Bearer\s+)[A-Z0-9._~+/-]+=*/gi;
+const COOKIE_HEADER_PATTERN = /\b((?:Set-Cookie|Cookie)\s*[:=]\s*)[^\r\n]*/gi;
+// Authorization schemes may contain spaces and Base64 padding (`==`), which can look like the
+// start of another keyed field to the generic pattern below. Consume the complete header line
+// first so no credential fragment survives under Basic, Bearer, Digest or future schemes.
+const AUTHORIZATION_HEADER_PATTERN = /\b((?:Proxy-)?Authorization\s*:\s*)[^\r\n]*/gi;
+const AUTHORIZATION_REDACTION_PLACEHOLDER = '__MP_AUTHORIZATION_REDACTED__';
+const JWT_TOKEN_PATTERN = /\beyJ[A-Z0-9_-]*\.[A-Z0-9_-]+\.[A-Z0-9_-]+\b/gi;
+const KEYED_SECRET_PATTERN = new RegExp(`((["']?(?:${SENSITIVE_ERROR_KEY_NAMES})["']?)\\s*[:=]\\s*)(?:"([^"\\r\\n]*)"|'([^'\\r\\n]*)'|([^,;\\r\\n}\\]&]*?))(?=\\s+[A-Z_][A-Z0-9_.-]*\\s*[:=]|[,;\\r\\n}\\]&]|$)`, 'gi');
+const redactKeyedSecret = (_match, prefix, _key, doubleQuotedValue, singleQuotedValue) => {
+  if (doubleQuotedValue !== undefined) {
+    return `${prefix}"[REDACTED]"`;
+  }
+  if (singleQuotedValue !== undefined) {
+    return `${prefix}'[REDACTED]'`;
+  }
+  return `${prefix}[REDACTED]`;
+};
+const redactSensitiveTelemetryValues = message => message.replace(EMAIL_ADDRESS_PATTERN, '[REDACTED_EMAIL]')
+// Use a neutral marker because the generic redactor treats the closing `]` in [REDACTED]
+// as a value delimiter and would otherwise process this header a second time.
+.replace(AUTHORIZATION_HEADER_PATTERN, `$1${AUTHORIZATION_REDACTION_PLACEHOLDER}`).replace(KEYED_SECRET_PATTERN, redactKeyedSecret)
+// Reconsume the complete header so semicolon-delimited cookie attributes cannot escape.
+.replace(COOKIE_HEADER_PATTERN, '$1[REDACTED]').replace(BEARER_TOKEN_PATTERN, '$1[REDACTED]').replace(JWT_TOKEN_PATTERN, '[REDACTED_JWT]').split(AUTHORIZATION_REDACTION_PLACEHOLDER).join('[REDACTED]');
+
+/**
+ * Preserves the real error text needed for production troubleshooting while redacting only
+ * credential/PII values. Error names, SDK codes, HTTP statuses and surrounding diagnostic context
+ * remain intact. Objects without a message are serialized with sensitive keys replaced.
+ */
+const toTelemetryErrorMessage = (error, fallback = 'Unknown error') => {
+  try {
+    if (typeof error === 'string' && error.trim()) {
+      return redactSensitiveTelemetryValues(error);
+    }
+    if (error && typeof error === 'object') {
+      const message = error.message;
+      if (typeof message === 'string' && message.trim()) {
+        return redactSensitiveTelemetryValues(message);
+      }
+      const errorCode = error.errorCode;
+      if (typeof errorCode === 'string' && errorCode.trim()) {
+        return redactSensitiveTelemetryValues(errorCode);
+      }
+      const seenObjects = new WeakSet();
+      const serialized = JSON.stringify(error, (key, value) => {
+        if (SENSITIVE_ERROR_KEY.test(key)) {
+          return '[REDACTED]';
+        }
+        if (typeof value === 'string') {
+          return redactSensitiveTelemetryValues(value);
+        }
+        if (typeof value === 'bigint') {
+          return String(value);
+        }
+        if (value && typeof value === 'object') {
+          if (seenObjects.has(value)) {
+            return '[Circular]';
+          }
+          seenObjects.add(value);
+        }
+        return value;
+      });
+      if (serialized && serialized !== '{}') {
+        return serialized;
+      }
+    }
+    if (error !== null && error !== undefined) {
+      const stringified = String(error);
+      if (stringified && stringified !== '[object Object]') {
+        return redactSensitiveTelemetryValues(stringified);
+      }
+    }
+  } catch {
+    // A malformed SDK object may throw from a getter or during serialization.
+  }
+  return fallback;
+};
+
+/**
+ * Classifies an arbitrary exception into the allowlisted Super Token catalog. This is an auxiliary
+ * dimension for grouping; the diagnostic message is produced independently by
+ * `toTelemetryErrorMessage`, so an unknown code does not erase the real failure context.
+ */
+const toSafeTelemetryErrorCode = error => {
+  const candidates = [error];
+  if (error && typeof error === 'object') {
+    try {
+      candidates.push(error.errorCode, error.message);
+    } catch {
+      return ErrorClassification_MPSuperTokenErrorCodes.UNKNOWN_ERROR;
+    }
+  }
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') {
+      continue;
+    }
+    const knownCode = KNOWN_ERROR_CODES.find(code => candidate.includes(code));
+    if (knownCode) {
+      return knownCode;
+    }
+  }
+  return ErrorClassification_MPSuperTokenErrorCodes.UNKNOWN_ERROR;
+};
+
+/**
+ * Single source of truth for the recoverable-error list (RN-2). Migrated 1:1 from the
+ * duplicated `recoverableErrors` arrays in the Classic (`event-handler.js:433-437`) and
+ * Blocks (`custom.block.js:128-132`) finalization handlers — the duplication that caused
+ * PSW-3737/PSW-4113 to be fixed in two places. A recoverable error lets the buyer retry
+ * without losing the checkout; any other code is unrecoverable.
+ */
+const RECOVERABLE_ERRORS = [ErrorClassification_MPSuperTokenErrorCodes.UPDATE_SECURITY_CODE_ERROR, ErrorClassification_MPSuperTokenErrorCodes.AUTHORIZE_PAYMENT_METHOD_ERROR, ErrorClassification_MPSuperTokenErrorCodes.AUTHORIZE_PAYMENT_METHOD_USER_CANCELLED];
+
+/**
+ * Whether an error code is recoverable. Strict membership — matches the legacy
+ * `recoverableErrors.includes(exception?.message)` (exact equality, not the substring
+ * match `resolveErrorMessage` uses), so classification behaviour is unchanged.
+ */
+const isRecoverable = errorCode => !!errorCode && RECOVERABLE_ERRORS.includes(errorCode);
+
+/** Buyer-facing error copy the message resolution selects from. */
+
+const errorMessagesFor = copy => ({
+  UPDATE_SECURITY_CODE_ERROR: {
+    withRetry: copy.updateSecurityCodeWithRetryText,
+    withoutRetry: copy.updateSecurityCodeNoRetryText
+  },
+  AUTHORIZE_PAYMENT_METHOD_ERROR: {
+    withRetry: copy.authorizePaymentMethodWithRetryText,
+    withoutRetry: copy.authorizePaymentMethodNoRetryText
+  },
+  AUTHORIZE_PAYMENT_METHOD_USER_CANCELLED: {
+    withRetry: copy.authorizePaymentMethodWithRetryText,
+    withoutRetry: copy.authorizePaymentMethodNoRetryText
+  },
+  SELECT_PAYMENT_METHOD_ERROR: {
+    withRetry: copy.selectPaymentMethodErrorText,
+    withoutRetry: copy.selectPaymentMethodErrorText
+  }
+});
+
+/**
+ * Resolves the buyer message for an error code. `errorCode.includes(key)` (substring)
+ * match is preserved from the legacy implementation. `allowRetry` is decided by the
+ * caller from the retry counter (SuperTokenState.shouldAllowRetry).
+ */
+const resolveErrorMessage = (errorCode, allowRetry, copy) => {
+  var _Object$entries$find$;
+  const errorMessages = errorMessagesFor(copy);
+  const errorConfig = (_Object$entries$find$ = Object.entries(errorMessages).find(([key]) => errorCode.includes(key))?.[1]) !== null && _Object$entries$find$ !== void 0 ? _Object$entries$find$ : null;
+  if (!errorConfig) {
+    return copy.genericErrorText;
+  }
+  return allowRetry ? errorConfig.withRetry : errorConfig.withoutRetry;
+};
 ;// ./assets/js/checkouts/super-token/adapters/platform/CoreMonitorMetricsAdapter.ts
+
+
 
 
 
@@ -320,13 +535,10 @@ class CoreMonitorMetricsAdapter_CoreMonitorMetricsAdapter {
     sendToCoreMonitor(metricName, this.buildPayload(value, message, errorCode));
   }
   normalizeErrorMessage(error) {
-    if (!error) return 'Unknown error';
-    const errorMessage = error?.message || (typeof error === 'string' ? error : JSON.stringify(error));
-    const normalizedErrorMessage = errorMessage?.includes('email') ? 'invalid_email_address_provided' : errorMessage;
-    return normalizedErrorMessage || 'Unknown error';
+    return toTelemetryErrorMessage(error);
   }
   errorCodeOf(error) {
-    return error?.errorCode || 'unknown';
+    return toSafeTelemetryErrorCode(error);
   }
 
   /** Send an error metric + dispatch a melidata event. Covers ~20 methods. */
@@ -402,9 +614,13 @@ class CoreMonitorMetricsAdapter_CoreMonitorMetricsAdapter {
     this.successBoolean('update_security_code_pseudotoken_updated');
   }
   errorOnSubmit(errorCode, error, shouldNormalizeError = true) {
-    const errorMessage = shouldNormalizeError ? this.normalizeErrorMessage(error) : error;
+    // Keep the legacy argument for binary compatibility. Both paths preserve the diagnostic text;
+    // the shared formatter only redacts credential/PII values.
+    void shouldNormalizeError;
+    const reportedErrorCode = toTelemetryErrorMessage(errorCode, 'UNKNOWN_ERROR');
+    const errorMessage = this.normalizeErrorMessage(error);
     this.melidata.dispatchMelidataErrorEvent(errorMessage, this.CUSTOM_CHECKOUT_STEPS.POST_SUBMIT);
-    this.sendMetric('error_on_submit_super_token', errorCode, errorMessage);
+    this.sendMetric('error_on_submit_super_token', reportedErrorCode, errorMessage);
   }
   registerClickOnPlaceOrderButton() {
     this.successBoolean('super_token_click_on_place_order_button');
@@ -495,8 +711,7 @@ class CoreMonitorMetricsAdapter_CoreMonitorMetricsAdapter {
     this.sendMetric('SUPER_TOKEN_INITIALIZATION_SUCCESS', 'true', `Super token was initialized successfully and is listening to the form Dispatched from: ${dispatchedFrom}`, this.INIT_SUCCESS_LEVEL);
   }
   superTokenInitializationError(error, dispatchedFrom) {
-    var _message;
-    const errorMessage = (_message = error?.message) !== null && _message !== void 0 ? _message : String(error);
+    const errorMessage = this.normalizeErrorMessage(error);
     this.sendMetric('SUPER_TOKEN_INITIALIZATION_ERROR', 'true', `An error occurred while checking super token initialization: ${errorMessage} Dispatched from: ${dispatchedFrom}`, this.INIT_ERROR_LEVEL);
   }
   superTokenClassesNotExist(missingSummary, dispatchedFrom) {
@@ -598,6 +813,7 @@ class CoreMonitorMetricsAdapter_CoreMonitorMetricsAdapter {
 ;// ./assets/js/checkouts/super-token/adapters/platform/VariantConfigAdapter.ts
 
 
+
 /**
  * Platform adapter: resolves the A/B variant string (RN-4), porting the selection
  * logic of `super-token-loader.js` into the hexagonal tree. It reads the remote
@@ -687,8 +903,7 @@ class VariantConfigAdapter_VariantConfigAdapter {
       this.trackMetric(this.METRIC_SUPER_TOKEN_AB_VARIANT, assignedVariant, 'source:assigned');
       return assignedVariant;
     } catch (error) {
-      const errorMessage = error?.message || 'async_error';
-      this.trackMetric(this.METRIC_LOAD_SUPER_TOKEN_BUNDLE, this.METRIC_STATUS_FAILURE, errorMessage);
+      this.trackMetric(this.METRIC_LOAD_SUPER_TOKEN_BUNDLE, this.METRIC_STATUS_FAILURE, toTelemetryErrorMessage(error, 'async_error'));
       return SUPER_TOKEN_FALLBACK_VARIANT;
     }
   }
@@ -775,15 +990,15 @@ class VariantConfigAdapter_VariantConfigAdapter {
         this.trackMetric(this.METRIC_FETCH_AB_CONFIG, 'success', 'success');
         this.trackMetric(this.METRIC_FETCH_AB_CONFIG_TIME, elapsedMs, '');
         return parsedConfig;
-      }).catch(() => {
+      }).catch(error => {
         if (!hasFetchTimedOut) {
-          this.trackMetric(this.METRIC_FETCH_AB_CONFIG, 'error', 'invalid_json');
+          this.trackMetric(this.METRIC_FETCH_AB_CONFIG, 'error', toTelemetryErrorMessage(error, 'invalid_json'));
         }
         return null;
       });
-    }).catch(() => {
+    }).catch(error => {
       if (!hasFetchTimedOut) {
-        this.trackMetric(this.METRIC_FETCH_AB_CONFIG, 'error', 'network_or_cors');
+        this.trackMetric(this.METRIC_FETCH_AB_CONFIG, 'error', toTelemetryErrorMessage(error, 'network_or_cors'));
       }
       return null;
     });
@@ -911,6 +1126,7 @@ const MP_SDK_INSTANCE_READY_EVENT = 'mp_sdk_instance_ready';
 const CARD_FORM_MOUNTED_EVENT = 'mp_card_form_mounted';
 const FALLBACK_POLL_INTERVAL_MS = 50;
 const FALLBACK_POLL_MAX_WAIT_MS = 15000;
+const COMPOSE_RETRY_INTERVAL_MS = 1000;
 const INIT_SOURCE = {
   ALREADY_READY: 'already_ready',
   SDK_INSTANCE_EVENT: 'sdk_event',
@@ -919,14 +1135,14 @@ const INIT_SOURCE = {
   CARD_FORM_RECOVERY: 'card_form_recovery'
 };
 /**
- * Watches for the MP SDK instance and triggers Super Token composition exactly once,
+ * Watches for the MP SDK instance and completes Super Token composition exactly once,
  * using three tiers in order of availability:
  *
  *   1. Already present at construction time  → compose immediately (ALREADY_READY)
  *   2. Arrives via `mp_sdk_instance_ready`   → compose on event (SDK_INSTANCE_EVENT
  *                                               or SDK_INSTANCE_EVENT_AFTER_LEGACY_WINDOW if >15s)
- *   3. Appears in `window.mpSdkInstance`     → compose on 50ms poll (FALLBACK_POLL),
- *                                               poll capped at 15s
+ *   3. Appears in `window.mpSdkInstance`     → discover on the 50ms poll (FALLBACK_POLL),
+ *                                               retry failed composition every 1s, capped at 15s
  *
  * After the poll cap, temporary load delays can still be recovered via
  * recoverIfSdkIsNowAvailable() — call it at natural page checkpoints
@@ -939,6 +1155,9 @@ class SdkReadinessWatcher {
   initialized = false;
   pendingCompose = null;
   activePoll = null;
+  nextComposeAttemptAt = 0;
+  failedComposeAttempts = 0;
+  reportRetryExhausted = null;
   constructor(deps) {
     var _deps$readSdkInstance, _deps$now;
     this.metrics = deps.metrics;
@@ -948,7 +1167,8 @@ class SdkReadinessWatcher {
   }
 
   /**
-   * Begins watching for SDK availability and calls `compose` exactly once.
+   * Begins watching for SDK availability and retries `compose` at a bounded cadence until the
+   * first successful composition.
    * The compose callback is stored so recoverIfSdkIsNowAvailable() can use it later.
    *
    * Idempotent: a second call is silently ignored to guard against accidental
@@ -959,20 +1179,23 @@ class SdkReadinessWatcher {
    * try-catch at the bundle entrypoint so a temporary compose failure does not abort
    * the bundle bootstrap before recoverIfSdkIsNowAvailable() has a chance to retry.
    */
-  start(compose) {
+  start(compose, reportRetryExhausted) {
     if (this.pendingCompose !== null) {
       return;
     }
     this.pendingCompose = compose;
+    this.reportRetryExhausted = reportRetryExhausted !== null && reportRetryExhausted !== void 0 ? reportRetryExhausted : null;
     if (this.readSdkInstance()) {
       this.composeWith(INIT_SOURCE.ALREADY_READY);
-      return;
+      if (this.initialized) {
+        return;
+      }
     }
     document.addEventListener(MP_SDK_INSTANCE_READY_EVENT, () => this.composeWith(INIT_SOURCE.SDK_INSTANCE_EVENT), {
       once: true
     });
     this.activePoll = setInterval(() => {
-      if (this.readSdkInstance()) {
+      if (this.readSdkInstance() && this.now() >= this.nextComposeAttemptAt) {
         this.composeWith(INIT_SOURCE.FALLBACK_POLL);
       }
     }, FALLBACK_POLL_INTERVAL_MS);
@@ -980,6 +1203,9 @@ class SdkReadinessWatcher {
       if (this.activePoll !== null) {
         clearInterval(this.activePoll);
         this.activePoll = null;
+      }
+      if (!this.initialized && this.failedComposeAttempts > 0) {
+        this.reportRetryExhausted?.(this.failedComposeAttempts);
       }
     }, FALLBACK_POLL_MAX_WAIT_MS);
   }
@@ -1018,11 +1244,18 @@ class SdkReadinessWatcher {
     if (this.initialized || !this.readSdkInstance() || !this.pendingCompose) {
       return;
     }
+    const composed = this.pendingCompose();
+    if (composed === false) {
+      this.failedComposeAttempts += 1;
+      // The 50 ms poll discovers SDK availability; it must not also hammer a failing composition.
+      // Keep recovery automatic, but retry the expensive construction at a bounded cadence.
+      this.nextComposeAttemptAt = this.now() + COMPOSE_RETRY_INTERVAL_MS;
+      return;
+    }
     if (this.activePoll !== null) {
       clearInterval(this.activePoll);
       this.activePoll = null;
     }
-    this.pendingCompose();
     this.initialized = true;
     this.metrics.superTokenSdkLoaded();
     this.reportInitSource(source);
@@ -1129,91 +1362,6 @@ class InitializationHealthChecker {
 
 
 
-;// ./assets/js/checkouts/super-token/core/checkoutSession/ErrorClassification.ts
-/**
- * Single source of truth for Super Token error codes and the pure mapping from an
- * error code to the message shown to the buyer. No side effects: unlike the legacy
- * convertErrorCodeToErrorMessage (v2.1:262), this neither increments the retry
- * counter nor emits metrics — the caller (use case) owns the counter (SuperTokenState)
- * and the retry-limit metric (MetricsPort).
- *
- * Codes migrated 1:1 from v2.1/errors/super-token-error-constants.js.
- */
-
-const ErrorClassification_MPSuperTokenErrorCodes = {
-  // Validation errors
-  SELECT_PAYMENT_METHOD_ERROR: 'SELECT_PAYMENT_METHOD_ERROR',
-  SELECT_PAYMENT_METHOD_NOT_VALID: 'SELECT_PAYMENT_METHOD_NOT_VALID',
-  // Authentication errors
-  AUTHENTICATOR_NOT_FOUND: 'AUTHENTICATOR_NOT_FOUND',
-  AUTHORIZE_PAYMENT_METHOD_ERROR: 'AUTHORIZE_PAYMENT_METHOD_ERROR',
-  AUTHORIZE_PAYMENT_METHOD_USER_CANCELLED: 'AUTHORIZE_PAYMENT_METHOD_USER_CANCELLED',
-  // Payment errors
-  UPDATE_SECURITY_CODE_ERROR: 'UPDATE_SECURITY_CODE_ERROR',
-  EMPTY_ACCOUNT_PAYMENT_METHODS: 'EMPTY_ACCOUNT_PAYMENT_METHODS',
-  GET_PAYMENT_METHOD_TIMEOUT_ERROR: 'GET_PAYMENT_METHOD_TIMEOUT_ERROR',
-  FETCH_PAYMENT_METHOD_NOT_FOUND: 'FETCH_PAYMENT_METHOD_NOT_FOUND',
-  PAYMENT_METHOD_NOT_EXISTS: 'PAYMENT_METHOD_NOT_EXISTS',
-  UPDATE_PAYMENT_METHOD_WITH_ESC_FAILED_EMPTY_METHODS: 'UPDATE_PAYMENT_METHOD_WITH_ESC_FAILED_EMPTY_METHODS',
-  // System errors
-  SUPER_TOKEN_PAYMENT_METHODS_NOT_FOUND: 'SUPER_TOKEN_PAYMENT_METHODS_NOT_FOUND',
-  SUPER_TOKEN_AUTHENTICATOR_NOT_FOUND: 'SUPER_TOKEN_AUTHENTICATOR_NOT_FOUND',
-  CUSTOM_CHECKOUT_ENTIRE_ELEMENT_NOT_FOUND: 'CUSTOM_CHECKOUT_ENTIRE_ELEMENT_NOT_FOUND',
-  SUPER_TOKEN_METRICS_NOT_FOUND: 'SUPER_TOKEN_METRICS_NOT_FOUND',
-  // Generic error
-  UNKNOWN_ERROR: 'UNKNOWN_ERROR'
-};
-/**
- * Single source of truth for the recoverable-error list (RN-2). Migrated 1:1 from the
- * duplicated `recoverableErrors` arrays in the Classic (`event-handler.js:433-437`) and
- * Blocks (`custom.block.js:128-132`) finalization handlers — the duplication that caused
- * PSW-3737/PSW-4113 to be fixed in two places. A recoverable error lets the buyer retry
- * without losing the checkout; any other code is unrecoverable.
- */
-const RECOVERABLE_ERRORS = [ErrorClassification_MPSuperTokenErrorCodes.UPDATE_SECURITY_CODE_ERROR, ErrorClassification_MPSuperTokenErrorCodes.AUTHORIZE_PAYMENT_METHOD_ERROR, ErrorClassification_MPSuperTokenErrorCodes.AUTHORIZE_PAYMENT_METHOD_USER_CANCELLED];
-
-/**
- * Whether an error code is recoverable. Strict membership — matches the legacy
- * `recoverableErrors.includes(exception?.message)` (exact equality, not the substring
- * match `resolveErrorMessage` uses), so classification behaviour is unchanged.
- */
-const isRecoverable = errorCode => !!errorCode && RECOVERABLE_ERRORS.includes(errorCode);
-
-/** Buyer-facing error copy the message resolution selects from. */
-
-const errorMessagesFor = copy => ({
-  UPDATE_SECURITY_CODE_ERROR: {
-    withRetry: copy.updateSecurityCodeWithRetryText,
-    withoutRetry: copy.updateSecurityCodeNoRetryText
-  },
-  AUTHORIZE_PAYMENT_METHOD_ERROR: {
-    withRetry: copy.authorizePaymentMethodWithRetryText,
-    withoutRetry: copy.authorizePaymentMethodNoRetryText
-  },
-  AUTHORIZE_PAYMENT_METHOD_USER_CANCELLED: {
-    withRetry: copy.authorizePaymentMethodWithRetryText,
-    withoutRetry: copy.authorizePaymentMethodNoRetryText
-  },
-  SELECT_PAYMENT_METHOD_ERROR: {
-    withRetry: copy.selectPaymentMethodErrorText,
-    withoutRetry: copy.selectPaymentMethodErrorText
-  }
-});
-
-/**
- * Resolves the buyer message for an error code. `errorCode.includes(key)` (substring)
- * match is preserved from the legacy implementation. `allowRetry` is decided by the
- * caller from the retry counter (SuperTokenState.shouldAllowRetry).
- */
-const resolveErrorMessage = (errorCode, allowRetry, copy) => {
-  var _Object$entries$find$;
-  const errorMessages = errorMessagesFor(copy);
-  const errorConfig = (_Object$entries$find$ = Object.entries(errorMessages).find(([key]) => errorCode.includes(key))?.[1]) !== null && _Object$entries$find$ !== void 0 ? _Object$entries$find$ : null;
-  if (!errorConfig) {
-    return copy.genericErrorText;
-  }
-  return allowRetry ? errorConfig.withRetry : errorConfig.withoutRetry;
-};
 ;// ./assets/js/checkouts/super-token/useCases/FinalizeSuperTokenPayment.ts
 /**
  * Canonical Super Token finalization (RN-1) — the single source shared by the Classic
@@ -2546,6 +2694,7 @@ class LegacyAuthenticatorSession {
  * composition edge.
  */
 
+
 const METRIC_DETAIL = 'validate_checkout_then_continue';
 const MAX_ANCESTOR_DEPTH = 20;
 const checkoutValidationResolver_SUPER_TOKEN_CHECKOUT_TYPE = 'super_token';
@@ -2723,14 +2872,15 @@ function resolveCheckoutValidation(response, metrics) {
         errors: realErrors
       };
     }
-    emitMetric(VALIDATION_METRIC.UNEXPECTED_RESPONSE, res?.data?.error || 'unknown');
+    const responseError = toTelemetryErrorMessage(res?.data?.error, FAIL_OPEN_REASON.UNEXPECTED_RESPONSE);
+    emitMetric(VALIDATION_METRIC.UNEXPECTED_RESPONSE, responseError);
     return {
       action: VALIDATION_ACTION.FAIL_OPEN,
       reason: FAIL_OPEN_REASON.UNEXPECTED_RESPONSE,
-      detail: res?.data?.error
+      detail: responseError
     };
   } catch (error) {
-    const errorMessage = error?.message || FAIL_OPEN_REASON.UNEXPECTED_ERROR;
+    const errorMessage = toTelemetryErrorMessage(error, FAIL_OPEN_REASON.UNEXPECTED_ERROR);
     emitMetric(VALIDATION_METRIC.UNEXPECTED_ERROR, errorMessage);
     return {
       action: VALIDATION_ACTION.FAIL_OPEN,
@@ -4355,7 +4505,13 @@ function applySelectedInstallmentDetails(paymentMethod, deps, session, hint, sel
 }
 function buildConsumerCreditsRow(paymentMethod, deps, presentation, session, installmentOptions, hint) {
   const row = buildInteractiveRow(paymentMethod, deps, presentation, session);
-  row.appendChild(buildDetailsSection(paymentMethod, deps, installmentOptions(paymentMethod)));
+  try {
+    row.appendChild(buildDetailsSection(paymentMethod, deps, installmentOptions(paymentMethod)));
+    session.recordConsumerCreditsDetails(true);
+  } catch (error) {
+    session.recordConsumerCreditsDetails(false);
+    throw error;
+  }
   wireConsumerCredits(row, paymentMethod, deps, session, hint);
   return row;
 }
@@ -4382,16 +4538,29 @@ function isCard(paymentMethod) {
   return PaymentMethodClassifier_isCreditCard(paymentMethod) || PaymentMethodClassifier_isDebitCard(paymentMethod) || isPrepaidCard(paymentMethod);
 }
 function buildTypedRow(paymentMethod, deps, presentation, context) {
-  if (isAccountMoney(paymentMethod) && context.rowSession) {
-    return buildInteractiveRow(paymentMethod, deps, presentation, context.rowSession);
+  try {
+    if (isAccountMoney(paymentMethod) && context.rowSession) {
+      return buildInteractiveRow(paymentMethod, deps, presentation, context.rowSession);
+    }
+    if (isCard(paymentMethod) && context.rowSession && context.installmentOptions) {
+      return buildCardRow(paymentMethod, deps, presentation, context.rowSession, context.installmentOptions);
+    }
+    if (isConsumerCredits(paymentMethod) && context.rowSession && context.installmentOptions && context.consumerCreditsHint) {
+      return buildConsumerCreditsRow(paymentMethod, deps, presentation, context.rowSession, context.installmentOptions, context.consumerCreditsHint);
+    }
+    return context.buildRow ? context.buildRow(paymentMethod) : buildPaymentMethodRow(paymentMethod, deps, presentation);
+  } catch (error) {
+    context.rowSession?.recordPaymentMethodRowFailure?.(error);
+    try {
+      // Keep the method visible even when its interactive details fail. This fallback contains
+      // presentation only, so the broken row cannot interrupt the remaining methods.
+      return buildPaymentMethodRow(paymentMethod, deps, presentation);
+    } catch {
+      // A malformed row must never abort the list. If even its presentation cannot be built,
+      // omit only this method and let the variant render every other row.
+      return null;
+    }
   }
-  if (isCard(paymentMethod) && context.rowSession && context.installmentOptions) {
-    return buildCardRow(paymentMethod, deps, presentation, context.rowSession, context.installmentOptions);
-  }
-  if (isConsumerCredits(paymentMethod) && context.rowSession && context.installmentOptions && context.consumerCreditsHint) {
-    return buildConsumerCreditsRow(paymentMethod, deps, presentation, context.rowSession, context.installmentOptions, context.consumerCreditsHint);
-  }
-  return context.buildRow ? context.buildRow(paymentMethod) : buildPaymentMethodRow(paymentMethod, deps, presentation);
 }
 ;// ./assets/js/checkouts/super-token/adapters/view/v2/styles.ts
 /** CSS classes used only by the v2 view (the single global list header). */
@@ -4429,10 +4598,17 @@ class V2SavedCardsView {
     const buildRow = paymentMethod => buildTypedRow(paymentMethod, this.deps, V2_ROW_PRESENTATION, context);
     // Insert each row at the top in reverse so the first method ends up first, then prepend the
     // single list header above them all (faithful to the legacy insert order).
+    let renderedRows = 0;
     [...paymentMethods].reverse().forEach(paymentMethod => {
-      container.insertBefore(buildRow(paymentMethod), container.firstChild);
+      const row = buildRow(paymentMethod);
+      if (row) {
+        container.insertBefore(row, container.firstChild);
+        renderedRows += 1;
+      }
     });
-    container.insertBefore(this.buildListHeader(), container.firstChild);
+    if (renderedRows > 0) {
+      container.insertBefore(this.buildListHeader(), container.firstChild);
+    }
   }
   reset(container) {
     container.querySelector(`.${V2_STYLES.PAYMENT_METHODS_LIST_HEADER}`)?.remove();
@@ -4604,6 +4780,10 @@ class V21SavedCardsView {
     if (!paymentMethods.length) {
       return;
     }
+    const rows = paymentMethods.map(buildRow).filter(row => row !== null);
+    if (!rows.length) {
+      return;
+    }
     const section = el('section', {
       classes: [V21_STYLES.BLOCK, blockModifierClass],
       attrs: {
@@ -4611,7 +4791,7 @@ class V21SavedCardsView {
         'aria-label': title,
         tabindex: '0'
       },
-      children: [this.buildBlockHeader(title, blockHeader), ...paymentMethods.map(buildRow)]
+      children: [this.buildBlockHeader(title, blockHeader), ...rows]
     });
     container.insertBefore(section, container.firstChild);
   }
@@ -5027,7 +5207,6 @@ class SuperTokenPaymentMethods {
   PAYMENT_METHODS_ORDER_TYPE_ACCOUNT_MONEY_FIRST = 'account_money_first';
   MAX_ATTEMPTS_BY_ERROR_CODE = 3;
   GET_PAYMENT_METHOD_TIMEOUT_MS = 5000;
-  ACCOUNT_MONEY_ANIMATION_MS = 300;
 
   // Attributes
   paymentMethods = [];
@@ -5048,11 +5227,12 @@ class SuperTokenPaymentMethods {
   // Dependencies
   emailHeaderListenerRegistered = false;
   selectUseCase = new SelectSavedPaymentMethod();
-  constructor(mpSdkInstance, mpSuperTokenMetrics, params, renderSavedMethods, wcEmailListener = null) {
+  constructor(mpSdkInstance, mpSuperTokenMetrics, params, renderSavedMethods, wcEmailListener = null, variantView = null) {
     this.mpSdkInstance = mpSdkInstance;
     this.mpSuperTokenMetrics = mpSuperTokenMetrics;
     this.renderSavedMethods = renderSavedMethods;
     this.wcEmailListener = wcEmailListener;
+    this.variantView = variantView;
     this.YELLOW_WALLET_PATH = params.yellow_wallet_path;
     this.YELLOW_MONEY_PATH = params.yellow_money_path;
     this.WHITE_CARD_PATH = params.white_card_path;
@@ -5124,6 +5304,7 @@ class SuperTokenPaymentMethods {
     return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
   reset() {
+    const customCheckoutEntireElement = this.getCustomCheckoutEntireElement();
     this.isRendering = false;
     this.paymentMethods = [];
     this.attemptsByErrorCode = {};
@@ -5141,7 +5322,9 @@ class SuperTokenPaymentMethods {
     this.removeMercadoPagoPrivacyPolicyFooter();
     this.removeHorizontalRow();
     this.removePaymentMethodsListClasses();
-    document.querySelectorAll(`.${this.SUPER_TOKEN_STYLES.BLOCK}`).forEach(blockElement => blockElement.remove());
+    if (customCheckoutEntireElement) {
+      this.variantView?.reset(customCheckoutEntireElement);
+    }
   }
   storePaymentMethodsInMemory(accountPaymentMethods) {
     this.paymentMethods = accountPaymentMethods;
@@ -5186,19 +5369,19 @@ class SuperTokenPaymentMethods {
   convertErrorCodeToErrorMessage(errorCode) {
     this.storeAttemptByErrorCode(errorCode);
     const errorMessages = {
-      'UPDATE_SECURITY_CODE_ERROR': {
+      UPDATE_SECURITY_CODE_ERROR: {
         withRetry: this.UPDATE_SECURITY_CODE_WITH_RETRY_ERROR_TEXT,
         withoutRetry: this.UPDATE_SECURITY_CODE_NO_RETRY_ERROR_TEXT
       },
-      'AUTHORIZE_PAYMENT_METHOD_ERROR': {
+      AUTHORIZE_PAYMENT_METHOD_ERROR: {
         withRetry: this.AUTHORIZE_PAYMENT_METHOD_WITH_RETRY_ERROR_TEXT,
         withoutRetry: this.AUTHORIZE_PAYMENT_METHOD_NO_RETRY_ERROR_TEXT
       },
-      'AUTHORIZE_PAYMENT_METHOD_USER_CANCELLED': {
+      AUTHORIZE_PAYMENT_METHOD_USER_CANCELLED: {
         withRetry: this.AUTHORIZE_PAYMENT_METHOD_WITH_RETRY_ERROR_TEXT,
         withoutRetry: this.AUTHORIZE_PAYMENT_METHOD_NO_RETRY_ERROR_TEXT
       },
-      'SELECT_PAYMENT_METHOD_ERROR': {
+      SELECT_PAYMENT_METHOD_ERROR: {
         withRetry: this.SELECT_PAYMENT_METHOD_ERROR_TEXT,
         withoutRetry: this.SELECT_PAYMENT_METHOD_ERROR_TEXT
       }
@@ -5367,15 +5550,14 @@ class SuperTokenPaymentMethods {
     }
   }
   deselectAllPaymentMethods() {
+    const customCheckoutEntireElement = this.getCustomCheckoutEntireElement();
     document.querySelectorAll(`.${this.SUPER_TOKEN_STYLES.PAYMENT_METHOD_SELECTED}`).forEach(element => {
       element.classList.remove(this.SUPER_TOKEN_STYLES.PAYMENT_METHOD_SELECTED);
       element.setAttribute('aria-selected', 'false');
-      if (element.dataset?.type === this.ACCOUNT_MONEY_TYPE && this.ACCOUNT_MONEY_BALANCE_TEXT) {
-        var _element$dataset$base;
-        element.setAttribute('aria-label', (_element$dataset$base = element.dataset.baseAriaLabel) !== null && _element$dataset$base !== void 0 ? _element$dataset$base : '');
-      }
     });
-    this.removeAccountMoneyBalanceLine();
+    if (customCheckoutEntireElement) {
+      this.variantView?.clearSelectionDecoration(customCheckoutEntireElement);
+    }
   }
   selectNewCardAccordion() {
     const accordionElement = document.querySelector(`.${this.SUPER_TOKEN_STYLES.PAYMENT_METHOD_ACCORDION}`);
@@ -5399,9 +5581,7 @@ class SuperTokenPaymentMethods {
   selectPaymentMethod(paymentMethodElement) {
     paymentMethodElement.classList.add(this.SUPER_TOKEN_STYLES.PAYMENT_METHOD_SELECTED);
     paymentMethodElement.setAttribute('aria-selected', 'true');
-    if (paymentMethodElement.dataset?.type === this.ACCOUNT_MONEY_TYPE) {
-      this.applyAccountMoneySelectionDecoration(paymentMethodElement);
-    }
+    this.variantView?.decorateSelection(paymentMethodElement);
   }
   getPaymentMethodSelectedFromDOMToAccountPaymentMethods(accountPaymentMethods) {
     const paymentMethodSelected = document.querySelector(`.${this.SUPER_TOKEN_STYLES.PAYMENT_METHOD_SELECTED}`) || null;
@@ -5597,74 +5777,6 @@ class SuperTokenPaymentMethods {
   }
   isConsumerCredits(paymentMethod) {
     return paymentMethod?.type === this.CONSUMER_CREDITS_TYPE;
-  }
-  applyAccountMoneySelectionDecoration(paymentMethodRow) {
-    var _paymentMethodRow$get;
-    // Remove any leftover balance line synchronously before appending the new one.
-    // The close removal is deferred (~transition duration), so a fast AM -> other -> AM
-    // toggle could otherwise leave two balance nodes coexisting and strand an --open
-    // node on a deselected row. Normal deselection still animates via removeAccountMoneyBalanceLine().
-    this.getCustomCheckoutEntireElement()?.querySelectorAll(`.${this.SUPER_TOKEN_STYLES.ACCOUNT_MONEY_BALANCE_LINE}`).forEach(node => node.remove());
-    const contentSection = paymentMethodRow?.querySelector(`.${this.SUPER_TOKEN_STYLES.PAYMENT_METHOD_CONTENT}`);
-    if (!contentSection) return;
-    const balanceParagraph = document.createElement('p');
-    balanceParagraph.classList.add(this.SUPER_TOKEN_STYLES.ACCOUNT_MONEY_BALANCE_LINE);
-    balanceParagraph.setAttribute('aria-live', 'polite');
-    balanceParagraph.textContent = this.ACCOUNT_MONEY_BALANCE_TEXT;
-    contentSection.appendChild(balanceParagraph);
-
-    // Trigger row/title and balance line transitions in the same frame.
-    // Stale-frame guard: if another method gets selected before this frame runs,
-    // the AM row is no longer selected/connected — skip reopening it (avoids an
-    // orphan --open state on an unselected row).
-    requestAnimationFrame(() => {
-      if (!paymentMethodRow?.isConnected || !paymentMethodRow.classList.contains(this.SUPER_TOKEN_STYLES.PAYMENT_METHOD_SELECTED)) {
-        return;
-      }
-      paymentMethodRow.classList.add(this.SUPER_TOKEN_STYLES.ACCOUNT_MONEY_ROW_OPEN);
-      balanceParagraph.classList.add(this.SUPER_TOKEN_STYLES.ACCOUNT_MONEY_BALANCE_LINE_OPEN);
-    });
-    const currentLabel = (_paymentMethodRow$get = paymentMethodRow?.getAttribute('aria-label')) !== null && _paymentMethodRow$get !== void 0 ? _paymentMethodRow$get : '';
-    if (this.ACCOUNT_MONEY_BALANCE_TEXT && !currentLabel.includes(this.ACCOUNT_MONEY_BALANCE_TEXT)) {
-      paymentMethodRow?.setAttribute('aria-label', `${currentLabel}. ${this.ACCOUNT_MONEY_BALANCE_TEXT}`);
-    }
-  }
-  removeAccountMoneyBalanceLine() {
-    var _customCheckoutRoot$q;
-    const customCheckoutRoot = this.getCustomCheckoutEntireElement();
-    if (!customCheckoutRoot) return;
-    const accountMoneyRow = (_customCheckoutRoot$q = customCheckoutRoot.querySelector(`.${this.SUPER_TOKEN_STYLES.ACCOUNT_MONEY_ROW_OPEN}`)) !== null && _customCheckoutRoot$q !== void 0 ? _customCheckoutRoot$q : customCheckoutRoot.querySelector(`.${this.SUPER_TOKEN_STYLES.ACCOUNT_MONEY_ROW}`);
-    accountMoneyRow?.classList.remove(this.SUPER_TOKEN_STYLES.ACCOUNT_MONEY_ROW_OPEN);
-    const balanceLine = customCheckoutRoot.querySelector(`.${this.SUPER_TOKEN_STYLES.ACCOUNT_MONEY_BALANCE_LINE}`);
-    if (!balanceLine) return;
-
-    // Already closing — avoid duplicate listeners/timers on the same node (fast toggle).
-    if (balanceLine.dataset.closing === '1') return;
-    balanceLine.dataset.closing = '1';
-    balanceLine.classList.remove(this.SUPER_TOKEN_STYLES.ACCOUNT_MONEY_BALANCE_LINE_OPEN);
-
-    // Remove the node only after the close transition actually finishes (event-driven),
-    // so the DOM removal never lands a frame before the animation ends — which is what
-    // caused the title to nudge at the end of the close. A timeout fallback guarantees
-    // cleanup if transitionend never fires (reduced motion, detached node, etc.).
-    let removed = false;
-    let fallbackTimer;
-    const finalize = () => {
-      if (removed) return;
-      removed = true;
-      balanceLine.remove();
-    };
-    // Listen until the max-height transition ends specifically — opacity/margin-top end
-    // separately, so we can't use { once: true } (it would fire on the wrong property).
-    const onTransitionEnd = function handleTransitionEnd(event) {
-      if (event.target === balanceLine && event.propertyName === 'max-height') {
-        clearTimeout(fallbackTimer);
-        balanceLine.removeEventListener('transitionend', handleTransitionEnd);
-        finalize();
-      }
-    };
-    balanceLine.addEventListener('transitionend', onTransitionEnd);
-    fallbackTimer = setTimeout(finalize, this.ACCOUNT_MONEY_ANIMATION_MS + 50);
   }
   getMpIconPaths() {
     return {
@@ -5959,7 +6071,7 @@ class SuperTokenPaymentMethods {
           this.setSecurityCodeReferenceTrue(paymentMethod);
           if (e.errorMessages.length === 0) {
             if (window.MPCheckoutFieldsDispatcher) {
-              window.MPCheckoutFieldsDispatcher.addEventListenerDispatcher(null, "focusout", "super_token_cvv_filled", {
+              window.MPCheckoutFieldsDispatcher.addEventListenerDispatcher(null, 'focusout', 'super_token_cvv_filled', {
                 onlyDispatch: true
               });
             }
@@ -6121,8 +6233,7 @@ class SuperTokenPaymentMethods {
       }
       return true;
     } catch (error) {
-      var _message;
-      this.mpSuperTokenMetrics?.sendMetric('error_to_validate_installment_selection', 'true', (_message = error?.message) !== null && _message !== void 0 ? _message : 'unknown');
+      this.mpSuperTokenMetrics?.sendMetric('error_to_validate_installment_selection', 'true', toTelemetryErrorMessage(error, 'unknown'));
       try {
         this.forceShowValidationErrors();
       } catch (uiError) {
@@ -6240,6 +6351,7 @@ class SuperTokenPaymentMethods {
     }, ANIMATION_DELAY);
   }
   renderAccountPaymentMethods(accountPaymentMethods, amount) {
+    let ownsRenderingLock = false;
     try {
       var _this$getPaymentMetho;
       this.storeAmount(amount);
@@ -6247,13 +6359,12 @@ class SuperTokenPaymentMethods {
       if (this.paymentMethodsAreRendered() || this.isRendering) return;
       if (!this.hasStoredPaymentMethods()) this.storePaymentMethodsInMemory(accountPaymentMethods);
       this.isRendering = true;
+      ownsRenderingLock = true;
       const customCheckoutEntireElement = this.getCustomCheckoutEntireElement();
       if (!customCheckoutEntireElement) {
-        this.isRendering = false;
         throw new Error(ErrorClassification_MPSuperTokenErrorCodes.CUSTOM_CHECKOUT_ENTIRE_ELEMENT_NOT_FOUND);
       }
       this.onCustomCheckoutWasRendered(customCheckoutEntireElement, accountPaymentMethods);
-      this.isRendering = false;
       setTimeout(() => {
         const sdkInstanceId = this.mpSuperTokenMetrics.getSdkInstanceId();
         this.mpSuperTokenMetrics.sendMetric('super_token_methods_ready', 'true', '');
@@ -6265,6 +6376,10 @@ class SuperTokenPaymentMethods {
       }, 500);
     } catch (error) {
       this.mpSuperTokenMetrics.errorToRenderAccountPaymentMethods(error);
+    } finally {
+      if (ownsRenderingLock) {
+        this.isRendering = false;
+      }
     }
   }
 }
@@ -6551,6 +6666,7 @@ class SuperTokenEmailListener {
 
 
 
+
 /** The subset of the ported authenticator the trigger handler reads and forwards to the sessions. */
 
 /** The subset of the ported e-mail listener the trigger handler reads and forwards to the sessions. */
@@ -6650,7 +6766,7 @@ class SuperTokenTriggerHandler {
       try {
         await this.restorePreloadedPaymentMethod();
       } catch (error) {
-        this.mpSuperTokenMetrics.sendMetric(RESTORE_ERROR_METRIC, error?.message || 'unknown', RESTORE_ERROR_MESSAGE);
+        this.mpSuperTokenMetrics.sendMetric(RESTORE_ERROR_METRIC, toTelemetryErrorMessage(error, 'unknown'), RESTORE_ERROR_MESSAGE);
       }
       const lastException = this.getLastException();
       if (lastException) {
@@ -6847,7 +6963,10 @@ class BasePaymentMethodWithInstallments extends BasePaymentMethod {
       const installmentsWithoutFee = paymentMethod.installments.filter(installment => installment.installment_rate === 0);
       return installmentsWithoutFee.length > 0 ? installmentsWithoutFee[installmentsWithoutFee.length - 1].installments : 0;
     }
-    const installmentsWithoutFee = paymentMethod.installments.filter(installment => installment.installment_rate === 0 && installment.installment_rate_collector.includes('MERCADOPAGO'));
+    const installmentsWithoutFee = paymentMethod.installments.filter(installment => {
+      var _installment$installm;
+      return installment.installment_rate === 0 && ((_installment$installm = installment.installment_rate_collector) !== null && _installment$installm !== void 0 ? _installment$installm : []).includes('MERCADOPAGO');
+    });
     return installmentsWithoutFee.length > 0 ? installmentsWithoutFee[installmentsWithoutFee.length - 1].installments : 0;
   }
   needsBankInterestDisclaimer() {
@@ -6874,10 +6993,11 @@ class BasePaymentMethodWithInstallments extends BasePaymentMethod {
    * third-party interest-free installment on sites that show the bank disclaimer.
    */
   buildInstallmentTitle(installment) {
+    var _installment$installm2;
     const installmentNumber = installment.installments;
     const installmentAmount = this.formatAmount(installment.installment_amount);
     const hasRate = installment.installment_rate !== 0;
-    const isThirdParty = installment.installment_rate_collector.includes('THIRD_PARTY');
+    const isThirdParty = ((_installment$installm2 = installment.installment_rate_collector) !== null && _installment$installm2 !== void 0 ? _installment$installm2 : []).includes('THIRD_PARTY');
     const totalAmount = this.formatAmount(installment.total_amount);
     if (installmentNumber === 1) {
       return `${installmentNumber}x ${totalAmount}`;
@@ -7218,9 +7338,9 @@ const CONSUMER_CREDITS_METHOD_TYPE = 'consumer_credits';
 
 /** The legacy metrics instance methods the render session forwards to. */
 
-// Module-level, mirroring the legacy per-controller `installmentsDispatcherMissingReported` flag so
-// the missing-dispatcher metric is emitted once even across re-renders (new session per render).
-let dispatcherMissingReported = false;
+// Module-level so a context is reported once even across re-renders (new session per render), while
+// keeping card and consumer-credits diagnostics independent from one another.
+const dispatcherMissingContexts = new Set();
 
 /**
  * The subset of the legacy `MPSuperTokenPaymentMethods` controller the render sequence calls.
@@ -7255,11 +7375,14 @@ class LegacyRenderSession {
     this.legacy.mpSuperTokenMetrics.installmentsFilled(methodType);
   }
   reportInstallmentDispatcherMissing(context) {
-    if (window.MPCheckoutFieldsDispatcher || typeof window.sendMetric !== 'function' || dispatcherMissingReported) {
+    if (window.MPCheckoutFieldsDispatcher || typeof window.sendMetric !== 'function' || dispatcherMissingContexts.has(context)) {
       return;
     }
     window.sendMetric(DISPATCHER_MISSING_METRIC, context, DISPATCHER_MISSING_MESSAGE);
-    dispatcherMissingReported = true;
+    dispatcherMissingContexts.add(context);
+  }
+  recordPaymentMethodRowFailure(error) {
+    this.legacy.mpSuperTokenMetrics.errorToRenderAccountPaymentMethods(error);
   }
   getFastPaymentToken() {
     return this.legacy.getSuperToken();
@@ -7293,6 +7416,9 @@ class LegacyRenderSession {
   }
   recordConsumerCreditsDueDate(success, error) {
     this.legacy.mpSuperTokenMetrics.renderConsumerCreditsDueDate(success, error);
+  }
+  recordConsumerCreditsDetails(success) {
+    this.legacy.mpSuperTokenMetrics.renderConsumerCreditsDetailsInnerHTML(success);
   }
 }
 ;// ./assets/js/checkouts/super-token/composition/variantRuntime.ts
@@ -7342,6 +7468,7 @@ function resolveSuperTokenVariant() {
  * render (Phase 6). In the pre-cutover hybrid the legacy bundle may build the instances first; the
  * window.mpSuperTokenTriggerHandler guard makes this a no-op then.
  */
+
 
 
 
@@ -7448,16 +7575,19 @@ function composeRuntime(domainParams, recompose, metrics) {
       // Referenced lazily by the render closure (assigned right after, before any render runs),
       // so the closure can be a constructor argument without a construction-order cycle.
       let paymentMethods;
-      const renderSavedMethods = (container, methods) => {
-        // One stylesheet serves both variants; the root's data-variant scopes each variant's rules.
-        container.setAttribute('data-variant', variant);
+      const getView = () => {
         if (!view) {
           view = createVariantView(variant, createVariantViewDeps(viewParams, emailListener));
         }
+        return view;
+      };
+      const renderSavedMethods = (container, methods) => {
+        // One stylesheet serves both variants; the root's data-variant scopes each variant's rules.
+        container.setAttribute('data-variant', variant);
         // The view builds every row itself now (createPaymentMethodElement is dropped), so buildRow
         // is omitted; the render session only supplies the interactive-row behaviour primitives.
         const session = new LegacyRenderSession(paymentMethods);
-        view.renderSavedPaymentMethods({
+        getView().renderSavedPaymentMethods({
           container,
           paymentMethods: orderAndDecorate(methods),
           rowSession: session,
@@ -7465,7 +7595,7 @@ function composeRuntime(domainParams, recompose, metrics) {
           consumerCreditsHint
         });
       };
-      paymentMethods = new SuperTokenPaymentMethods(sdk, entityMetrics, bundleParams, renderSavedMethods, emailListener);
+      paymentMethods = new SuperTokenPaymentMethods(sdk, entityMetrics, bundleParams, renderSavedMethods, emailListener, getView());
       const authenticator = new SuperTokenAuthenticator(sdk, paymentMethods, entityMetrics, bundleParams.platform_id);
       const errorHandler = new SuperTokenErrorHandler(paymentMethods, entityMetrics);
       const triggerHandler = new SuperTokenTriggerHandler(authenticator, emailListener, paymentMethods, errorHandler, entityMetrics, bundleParams.current_user_email);
@@ -7500,14 +7630,17 @@ function composeRuntime(domainParams, recompose, metrics) {
       try {
         buildAndPublishInstances();
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        metrics.sendMetric('super_token_compose_failed', 'mp_super_token_init', message);
+        metrics.sendMetric('super_token_compose_failed', 'mp_super_token_init', toTelemetryErrorMessage(error));
       }
     });
   };
-  resolveSuperTokenVariant().then(composeWithVariant).catch(error => {
-    const message = error instanceof Error ? error.message : String(error);
-    metrics.sendMetric('super_token_compose_failed', 'mp_super_token_init', message);
+  return resolveSuperTokenVariant().then(composeWithVariant).catch(error => {
+    metrics.sendMetric('super_token_compose_failed', 'mp_super_token_init', toTelemetryErrorMessage(error));
+    try {
+      composeWithVariant(SUPER_TOKEN_FALLBACK_VARIANT);
+    } catch (fallbackError) {
+      metrics.sendMetric('super_token_compose_failed', 'mp_super_token_init', toTelemetryErrorMessage(fallbackError));
+    }
   });
 }
 ;// ./assets/js/checkouts/super-token/composition/initializationResilience.ts
@@ -7517,6 +7650,8 @@ function composeRuntime(domainParams, recompose, metrics) {
  * now owns after the equivalent code was stripped from the legacy mp-super-token.js — and the
  * checker validates the composed instances after the card form mounts.
  */
+
+
 
 // The health check validates the composed instances. In the hybrid they are the legacy globals
 // the CDN bundle builds; return null until they exist so the checker can re-evaluate later.
@@ -7564,13 +7699,22 @@ function startInitializationResilience(recompose, metrics) {
   // the stateful classes), but in self-construct — and after the cutover — the tree composes, so the
   // watcher's card-form recovery path must re-run the composition for a late SDK that arrived after
   // the poll window closed. The watcher also owns the SDK-readiness signals.
+  let firstComposeFailureReported = false;
+  let lastComposeError;
   watcher.start(() => {
     try {
       recompose.current();
+      return true;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      metrics.sendMetric('super_token_recovery_compose_failed', 'mp_super_token_init', message);
+      lastComposeError = error;
+      if (!firstComposeFailureReported) {
+        metrics.sendMetric('super_token_recovery_compose_failed', 'mp_super_token_init', toTelemetryErrorMessage(error));
+        firstComposeFailureReported = true;
+      }
+      return false;
     }
+  }, attempts => {
+    metrics.sendMetric('super_token_recovery_compose_failed', 'mp_super_token_init', `retry_exhausted:${attempts}; last_error:${toTelemetryErrorMessage(lastComposeError)}`);
   });
 }
 ;// ./assets/js/checkouts/super-token/bootstrap.ts
@@ -7626,11 +7770,13 @@ const bootstrap_PARAMS_FALLBACK = {
 };
 const metrics = new CoreMonitorMetricsAdapter_CoreMonitorMetricsAdapter(() => window.mpSdkInstance, SUPER_TOKEN_JS_VERSION, (_window$wc_mercadopag = window.wc_mercadopago_supertoken_bundle_params) !== null && _window$wc_mercadopag !== void 0 ? _window$wc_mercadopag : bootstrap_PARAMS_FALLBACK);
 if (domainParams) {
-  composeRuntime(domainParams, recompose, metrics);
+  // The SDK watcher must observe the real variant-bound callback. Starting it before this Promise
+  // settles can mark an empty callback as initialized when the SDK was already present.
+  void composeRuntime(domainParams, recompose, metrics).then(() => {
+    startInitializationResilience(recompose, metrics);
+  });
+} else {
+  startInitializationResilience(recompose, metrics);
 }
-
-// Initialization resilience (Phase 2): runs synchronously after the (async) runtime composition,
-// mirroring the original module order.
-startInitializationResilience(recompose, metrics);
 /******/ })()
 ;
