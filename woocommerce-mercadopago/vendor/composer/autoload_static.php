@@ -206,6 +206,7 @@ class ComposerStaticInitc1de69b76030d115c5b8ac0d51904f46
         'MercadoPago\\Woocommerce\\SmartPix\\Contracts\\SmartPixNotificationIdentifiers' => __DIR__ . '/../..' . '/src/SmartPix/Contracts/SmartPixNotificationIdentifiers.php',
         'MercadoPago\\Woocommerce\\SmartPix\\Contracts\\SmartPixOrderClient' => __DIR__ . '/../..' . '/src/SmartPix/Contracts/SmartPixOrderClient.php',
         'MercadoPago\\Woocommerce\\SmartPix\\Contracts\\SmartPixRequestObservation' => __DIR__ . '/../..' . '/src/SmartPix/Contracts/SmartPixRequestObservation.php',
+        'MercadoPago\\Woocommerce\\SmartPix\\Core\\SmartPixAttemptReference' => __DIR__ . '/../..' . '/src/SmartPix/Core/SmartPixAttemptReference.php',
         'MercadoPago\\Woocommerce\\SmartPix\\Core\\SmartPixAuthorizedPayment' => __DIR__ . '/../..' . '/src/SmartPix/Core/SmartPixAuthorizedPayment.php',
         'MercadoPago\\Woocommerce\\SmartPix\\Core\\SmartPixBuyerError' => __DIR__ . '/../..' . '/src/SmartPix/Core/SmartPixBuyerError.php',
         'MercadoPago\\Woocommerce\\SmartPix\\Core\\SmartPixCpf' => __DIR__ . '/../..' . '/src/SmartPix/Core/SmartPixCpf.php',

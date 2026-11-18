@@ -191,6 +191,7 @@ return array(
     'MercadoPago\\Woocommerce\\SmartPix\\Contracts\\SmartPixNotificationIdentifiers' => $baseDir . '/src/SmartPix/Contracts/SmartPixNotificationIdentifiers.php',
     'MercadoPago\\Woocommerce\\SmartPix\\Contracts\\SmartPixOrderClient' => $baseDir . '/src/SmartPix/Contracts/SmartPixOrderClient.php',
     'MercadoPago\\Woocommerce\\SmartPix\\Contracts\\SmartPixRequestObservation' => $baseDir . '/src/SmartPix/Contracts/SmartPixRequestObservation.php',
+    'MercadoPago\\Woocommerce\\SmartPix\\Core\\SmartPixAttemptReference' => $baseDir . '/src/SmartPix/Core/SmartPixAttemptReference.php',
     'MercadoPago\\Woocommerce\\SmartPix\\Core\\SmartPixAuthorizedPayment' => $baseDir . '/src/SmartPix/Core/SmartPixAuthorizedPayment.php',
     'MercadoPago\\Woocommerce\\SmartPix\\Core\\SmartPixBuyerError' => $baseDir . '/src/SmartPix/Core/SmartPixBuyerError.php',
     'MercadoPago\\Woocommerce\\SmartPix\\Core\\SmartPixCpf' => $baseDir . '/src/SmartPix/Core/SmartPixCpf.php',
